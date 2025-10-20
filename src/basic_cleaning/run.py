@@ -3,6 +3,7 @@
 Download from W&B the raw dataset and apply some basic data cleaning, exporting the result to a new artifact
 """
 import argparse
+import os
 import logging
 import wandb
 import pandas as pd
@@ -41,8 +42,8 @@ def go(args):
      type=args.output_type,
      description=args.output_description,
  )
-    artifact.add_file("clean_sample.csv")
-    run.log_artifact(artifact)
+    artifact.add_file(os.path.abspath('clean_sample.csv'))
+    run.log_artifact(artifact).wait()
 
 
 # TODO: In the code below, fill in the data type for each argumemt. The data type should be str, float or int. 
@@ -53,43 +54,43 @@ if __name__ == "__main__":
   
     parser.add_argument(
         "--input_artifact", 
-        type = ## INSERT TYPE HERE: str, float or int,
-        help = ## INSERT DESCRIPTION HERE,
+        type = str,
+        help = "Fully-qualified W&B artifact to download for cleaning (e.g., 'raw_data:latest')",
         required = True
     )
 
     parser.add_argument(
         "--output_artifact", 
-        type = ## INSERT TYPE HERE: str, float or int,
-        help = ## INSERT DESCRIPTION HERE,
+        type = str,
+        help = "Filename for the cleaned CSV artifact to create (e.g., 'clean_sample.csv')",
         required = True
     )
 
     parser.add_argument(
         "--output_type", 
-        type = ## INSERT TYPE HERE: str, float or int,
-        help = ## INSERT DESCRIPTION HERE,
+        type = str,
+        help = "W&B artifact type for the cleaned data (e.g., 'clean_sample')",
         required = True
     )
 
     parser.add_argument(
         "--output_description", 
-        type = ## INSERT TYPE HERE: str, float or int,
-        help = ## INSERT DESCRIPTION HERE,
+        type = str,
+        help = "Free-text description of what the cleaned artifact contains",
         required = True
     )
 
     parser.add_argument(
         "--min_price", 
-        type = ## INSERT TYPE HERE: str, float or int,
-        help = ## INSERT DESCRIPTION HERE,
+        type = float,
+        help = "Minimum price threshold to keep; rows below are dropped",
         required = True
     )
 
     parser.add_argument(
         "--max_price",
-        type = ## INSERT TYPE HERE: str, float or int,
-        help = ## INSERT DESCRIPTION HERE,
+        type = float,
+        help = "Maximum price threshold to keep; rows above are dropped",
         required = True
     )
 
@@ -97,3 +98,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     go(args)
+
+    # Ensure W&B flushes
+    wandb.finish()
