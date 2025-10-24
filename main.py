@@ -5,12 +5,11 @@ from typing import List
 
 import mlflow
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 from hydra.utils import get_original_cwd
 
 log = logging.getLogger(__name__)
 
-# Default pipeline steps
 STEPS_DEFAULT: List[str] = [
     "download",
     "basic_cleaning",
@@ -20,28 +19,20 @@ STEPS_DEFAULT: List[str] = [
     # "test_regression_model",  # run explicitly after promoting a model to prod
 ]
 
+@hydra.main(config_path=".", config_name="config")
+def go(config: DictConfig):
 
-@hydra.main(config_path="src", config_name="config", version_base=None)
-def go(config: DictConfig) -> None:
-    """
-    Orchestrates the ML pipeline via mlflow.run() calls.
-    Use `-P steps=...` to select specific steps (comma-separated).
-    """
-
-    # Normalize steps into a list
     steps_val = config["main"].get("steps", STEPS_DEFAULT)
-    if isinstance(steps_val, (list, tuple)):
-        active_steps = list(steps_val)
-    else:
-        active_steps = [s.strip() for s in str(steps_val).split(",") if s.strip()]
-
+    active_steps = list(steps_val) if isinstance(steps_val, (list, tuple)) else [
+        st.strip() for st in str(steps_val).split(",") if st.strip()
+    ]
     log.info("Active pipeline steps: %s", active_steps)
 
-    # --- download ------------------------------------------------------------
+    # --- download ---
     if "download" in active_steps:
         _ = mlflow.run(
             os.path.join(get_original_cwd(), "src", "get_data"),
-            entry_point="main",
+            "main",
             parameters={
                 "file_url": config["data"]["file_url"],
                 "artifact_name": config["data"]["artifact_name"],
@@ -51,13 +42,13 @@ def go(config: DictConfig) -> None:
             env_manager="local",
         )
 
-    # --- basic_cleaning ------------------------------------------------------
+    # --- basic_cleaning ---
     if "basic_cleaning" in active_steps:
         _ = mlflow.run(
             os.path.join(get_original_cwd(), "src", "basic_cleaning"),
-            entry_point="main",
+            "main",
             parameters={
-                "input_artifact": f"{config['data']['artifact_name']}:latest",
+                "input_artifact": config["data"]["artifact_name"] + ":latest",
                 "output_artifact": "clean_sample.csv",
                 "output_type": "clean_sample",
                 "output_description": "Cleaned sample with price/geo filters",
@@ -67,12 +58,12 @@ def go(config: DictConfig) -> None:
             env_manager="local",
         )
 
-    # --- data_check ----------------------------------------------------------
+    # --- data_check ---
     if "data_check" in active_steps:
         clean_ref = "clean_sample.csv:latest"
         _ = mlflow.run(
             os.path.join(get_original_cwd(), "src", "data_check"),
-            entry_point="main",
+            "main",
             parameters={
                 "csv": clean_ref,
                 "ref": clean_ref,
@@ -84,12 +75,11 @@ def go(config: DictConfig) -> None:
             env_manager="local",
         )
 
-    # --- data_split: split into train/val and test ---------------------------
+    # --- data_split ---
     if "data_split" in active_steps:
-        comp_repo = config["main"]["components_repository"]
         _ = mlflow.run(
-            f"{comp_repo}/train_val_test_split",
-            entry_point="main",
+            f"{config['main']['components_repository']}/train_val_test_split",
+            "main",
             parameters={
                 "input_artifact": "clean_sample.csv:latest",
                 "test_size": config["modeling"]["test_size"],
@@ -99,17 +89,15 @@ def go(config: DictConfig) -> None:
             env_manager="local",
         )
 
-    # --- train_random_forest -------------------------------------------------
+    # --- train_random_forest ---
     if "train_random_forest" in active_steps:
-        # Serialize RF config to JSON
-        rf_cfg_obj = OmegaConf.to_object(config["modeling"]["random_forest"])
         rf_config_path = os.path.abspath("rf_config.json")
         with open(rf_config_path, "w") as fp:
-            json.dump(rf_cfg_obj, fp)
+            json.dump(dict(config["modeling"]["random_forest"].items()), fp)
 
         _ = mlflow.run(
             os.path.join(get_original_cwd(), "src", "train_random_forest"),
-            entry_point="main",
+            "main",
             parameters={
                 "trainval_artifact": "trainval_data.csv:latest",
                 "val_size": config["modeling"]["val_size"],
@@ -122,18 +110,17 @@ def go(config: DictConfig) -> None:
             env_manager="local",
         )
 
-    # --- test_regression_model (run explicitly after promoting a model) ------
+    # --- test_regression_model (run after promoting a model to prod) ---
     if "test_regression_model" in active_steps:
         _ = mlflow.run(
             os.path.join(get_original_cwd(), "components", "test_regression_model"),
-            entry_point="main",
+            "main",
             parameters={
                 "mlflow_model": "random_forest_export:prod",
                 "test_artifact": "test_data.csv:latest",
             },
             env_manager="local",
         )
-
 
 if __name__ == "__main__":
     go()
