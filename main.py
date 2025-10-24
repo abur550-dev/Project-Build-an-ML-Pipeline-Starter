@@ -56,7 +56,8 @@ def go(cfg: DictConfig) -> None:
     log.info("Active pipeline steps: %s", active_steps)
 
     # Common paths
-    repo_root = get_original_cwd()
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    src_dir = os.path.join(repo_root, "src")
     components_dir = os.path.join(repo_root, "components")
 
     # -----------------------------
