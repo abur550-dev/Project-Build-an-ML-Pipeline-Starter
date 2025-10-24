@@ -1,191 +1,185 @@
 #!/usr/bin/env python3
 import os
-import json
+import sys
 import logging
-from typing import List
-
 import mlflow
-import hydra
+
+# Hydra / config
 from omegaconf import DictConfig, OmegaConf
-from hydra.utils import get_original_cwd
+import hydra
 
 log = logging.getLogger(__name__)
+logging.basicConfig(
+    level=os.environ.get("LOGLEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
+# -------- Paths --------
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(REPO_ROOT, "src")
+COMPONENTS_DIR = os.path.join(REPO_ROOT, "components")
 
-def _get(cfg: DictConfig, path: str, default=None):
+# Small helper for safe config access
+def _get(cfg: DictConfig, dotted: str, default=None):
     """
-    Safe nested getter for OmegaConf DictConfig.
-    Example: _get(cfg, "modeling.random_forest.max_depth", 10)
+    Read a dotted key from an OmegaConf DictConfig with a default.
     """
-    cur = cfg
-    for key in path.split("."):
-        if not isinstance(cur, DictConfig) or key not in cur:
-            return default
-        cur = cur[key]
-    return cur
-
-
-def _parse_steps(steps_str: str) -> List[str]:
-    """
-    Turn comma-separated steps string into a list.
-    Accepts 'all' or blank to run everything in order.
-    """
-    if not steps_str or steps_str.strip() in ("", "all"):
-        return [
-            "download",
-            "basic_cleaning",
-            "data_check",
-            "data_split",
-            "train_random_forest",
-            "test_regression_model",
-        ]
-    return [s.strip() for s in steps_str.split(",") if s.strip()]
+    try:
+        val = OmegaConf.select(cfg, dotted)
+        return default if val is None else val
+    except Exception:
+        return default
 
 
 @hydra.main(config_path="src", config_name="config", version_base=None)
-def go(cfg: DictConfig) -> None:
+def go(cfg: DictConfig):
     """
-    Orchestrates the pipeline via MLflow Projects.
-    Expects src/config.yaml (Hydra) to exist.
+    Orchestrates the ML pipeline via MLflow Projects.
+    You can select steps with:  -P steps="step1,step2"
+    Use "all" to run the whole pipeline.
     """
-    # Show the active config for debugging
-    log.info("Hydra config:\n%s", OmegaConf.to_yaml(cfg))
+    # Ensure mlflow runs from repo root (so relative paths work)
+    os.chdir(REPO_ROOT)
 
-    # Determine which steps to run
-    active_steps = _parse_steps(_get(cfg, "main.steps", "all"))
-    log.info("Active pipeline steps: %s", active_steps)
+    log.info("Active pipeline steps selection: %s", _get(cfg, "main.steps", "all"))
 
-    # Common paths
-    repo_root = os.path.dirname(os.path.abspath(__file__))
-    src_dir = os.path.join(repo_root, "src")
-    components_dir = os.path.join(repo_root, "components")
+    # Define the known steps in order
+    default_steps = [
+        "download",
+        "basic_cleaning",
+        "data_check",
+        "data_split",
+        "train_random_forest",
+        "register_model",
+        "test_regression_model",  # not in default "all" run unless specified
+    ]
 
-    # -----------------------------
-    # 1) DOWNLOAD
-    # -----------------------------
+    steps_param = _get(cfg, "main.steps", "all")
+    if steps_param == "all":
+        active_steps = default_steps[:-1]  # exclude test step by default
+    else:
+        # Allow comma or space separated
+        parts = [s.strip() for s in steps_param.replace(" ", ",").split(",") if s.strip()]
+        active_steps = parts
+
+    # --- 1) DOWNLOAD ---
     if "download" in active_steps:
         log.info("Running step: download")
         _ = mlflow.run(
-            os.path.join(components_dir, "get_data"),
-            "main",
+            os.path.join(SRC_DIR, "download_file"),
+            entry_point="main",
             parameters={
-                "file_url": _get(cfg, "data.file_url"),
-                "artifact_name": _get(cfg, "data.raw_artifact", "raw_data.csv"),
-                "artifact_type": "raw_data",
-                "artifact_description": "Raw file as downloaded",
+                "file_url": _get(cfg, "etl.file_url"),
+                "artifact_name": _get(cfg, "etl.artifact_name"),
+                "artifact_type": _get(cfg, "etl.artifact_type"),
+                "artifact_description": _get(cfg, "etl.artifact_description"),
             },
             env_manager="local",
         )
 
-    # -----------------------------
-    # 2) BASIC CLEANING
-    # -----------------------------
+    # --- 2) BASIC CLEANING ---
     if "basic_cleaning" in active_steps:
         log.info("Running step: basic_cleaning")
         _ = mlflow.run(
-            os.path.join(components_dir, "basic_cleaning"),
-            "main",
+            os.path.join(SRC_DIR, "basic_cleaning"),
+            entry_point="main",
             parameters={
-                "input_artifact": _get(cfg, "data.raw_artifact", "raw_data.csv:latest"),
-                "output_artifact": _get(cfg, "data.cleaned_artifact", "clean_sample.csv"),
-                "output_type": "cleaned_data",
-                "output_description": "Data after basic cleaning",
-                "min_price": str(_get(cfg, "data.min_price", 10)),
-                "max_price": str(_get(cfg, "data.max_price", 350)),
+                "input_artifact": _get(cfg, "cleaning.input_artifact", "sample.csv:latest"),
+                "output_artifact": _get(cfg, "cleaning.output_artifact", "clean_sample.csv"),
+                "output_type": _get(cfg, "cleaning.output_type", "clean_sample"),
+                "output_description": _get(cfg, "cleaning.output_description", "Cleaned data"),
+                "min_price": str(_get(cfg, "cleaning.min_price")),
+                "max_price": str(_get(cfg, "cleaning.max_price")),
             },
             env_manager="local",
         )
 
-    # -----------------------------
-    # 3) DATA CHECK
-    # -----------------------------
+    # --- 3) DATA CHECK ---
     if "data_check" in active_steps:
         log.info("Running step: data_check")
         _ = mlflow.run(
-            os.path.join(components_dir, "data_check"),
-            "main",
+            os.path.join(SRC_DIR, "data_check"),
+            entry_point="main",
             parameters={
-                "csv": _get(cfg, "data.cleaned_artifact", "clean_sample.csv:latest"),
-                "ref": _get(cfg, "data.ref_artifact", "clean_sample.csv:reference"),
-                "kl_threshold": str(_get(cfg, "data.kl_threshold", 0.2)),
+                "csv": _get(cfg, "data_check.csv", "clean_sample.csv:latest"),
+                "ref": _get(cfg, "data_check.ref", "clean_sample.csv:latest"),
+                "kl_threshold": str(_get(cfg, "data_check.kl_threshold", 0.2)),
             },
             env_manager="local",
         )
 
-    # -----------------------------
-    # 4) DATA SPLIT
-    # -----------------------------
+    # --- 4) DATA SPLIT ---
     if "data_split" in active_steps:
         log.info("Running step: data_split")
         _ = mlflow.run(
-            os.path.join(components_dir, "train_val_test_split"),
-            "main",
+            os.path.join(SRC_DIR, "data_split"),
+            entry_point="main",
             parameters={
-                "csv": _get(cfg, "data.cleaned_artifact", "clean_sample.csv:latest"),
-                "test_size": str(_get(cfg, "modeling.test_size", 0.2)),
-                "random_seed": str(_get(cfg, "modeling.random_seed", 42)),
-                "stratify_by": _get(cfg, "modeling.stratify_by", "neighbourhood_group"),
+                "input_artifact": _get(cfg, "data_split.input_artifact", "clean_sample.csv:latest"),
+                "test_size": str(_get(cfg, "data_split.test_size", 0.2)),
+                "random_seed": str(_get(cfg, "data_split.random_seed", 42)),
+                "stratify_by": _get(cfg, "data_split.stratify_by", "neighbourhood_group"),
             },
             env_manager="local",
         )
 
-    # -----------------------------
-    # 5) TRAIN RANDOM FOREST
-    # -----------------------------
+    # --- 5) TRAIN RANDOM FOREST ---
     if "train_random_forest" in active_steps:
         log.info("Running step: train_random_forest")
 
-        # Build/override RF config into a JSON file for the step
-        rf_cfg = {
-            "n_estimators": _get(cfg, "modeling.random_forest.n_estimators", 100),
-            "max_depth": _get(cfg, "modeling.random_forest.max_depth", 15),
-            "max_features": _get(cfg, "modeling.random_forest.max_features", 0.5),
-            "min_samples_split": _get(cfg, "modeling.random_forest.min_samples_split", 2),
-            "min_samples_leaf": _get(cfg, "modeling.random_forest.min_samples_leaf", 1),
-            "n_jobs": _get(cfg, "modeling.random_forest.n_jobs", -1),
-            "random_state": _get(cfg, "modeling.random_forest.random_state", 42),
-        }
-
-        rf_config_path = os.path.join(os.getcwd(), "rf_config.json")
-        with open(rf_config_path, "w") as f:
-            json.dump(rf_cfg, f)
+        # Path to rf_config.json (already provided in the repo)
+        rf_config = os.path.join(REPO_ROOT, "rf_config.json")
 
         _ = mlflow.run(
-            os.path.join(repo_root, "src", "train_random_forest"),
-            "main",
+            os.path.join(SRC_DIR, "train_random_forest"),
+            entry_point="main",
             parameters={
-                # Per lesson hint, use this exact artifact name
-                "trainval_artifact": _get(cfg, "data.trainval_artifact", "trainval_data.csv:latest"),
+                # per instructions
+                "trainval_artifact": _get(cfg, "modeling.trainval_artifact", "trainval_data.csv:latest"),
                 "val_size": str(_get(cfg, "modeling.val_size", 0.2)),
                 "random_seed": str(_get(cfg, "modeling.random_seed", 42)),
                 "stratify_by": _get(cfg, "modeling.stratify_by", "neighbourhood_group"),
-                "rf_config": rf_config_path,
+                "rf_config": rf_config,
                 "max_tfidf_features": str(_get(cfg, "modeling.max_tfidf_features", 5)),
-                # Per lesson hint, use this exact output name
                 "output_artifact": _get(cfg, "modeling.output_artifact", "random_forest_export"),
             },
             env_manager="local",
         )
 
-    # -----------------------------
-    # 6) TEST REGRESSION MODEL (after promotion to prod)
-    # -----------------------------
+    # --- 6) REGISTER MODEL (optional utility step) ---
+    # If your training step already registers via MLflow, you can skip this.
+    if "register_model" in active_steps:
+        log.info("Running step: register_model")
+        _ = mlflow.run(
+            os.path.join(SRC_DIR, "register_model"),
+            entry_point="main",
+            parameters={
+                "model_export": _get(cfg, "register.model_export", "random_forest_export"),
+                "model_name": _get(cfg, "register.model_name", "nyc_airbnb_price_model"),
+                # Optionally promote/alias inside that component if supported
+            },
+            env_manager="local",
+        )
+
+    # --- 7) TEST REGRESSION MODEL (run manually after promotion to prod) ---
     if "test_regression_model" in active_steps:
         log.info("Running step: test_regression_model")
         _ = mlflow.run(
-            os.path.join(components_dir, "test_regression_model"),
-            "main",
+            os.path.join(COMPONENTS_DIR, "test_regression_model"),  # IMPORTANT: components, not src
+            entry_point="main",
             parameters={
-                # Use the model that was promoted to prod
                 "mlflow_model": _get(cfg, "testing.mlflow_model", "random_forest_export:prod"),
-                # Use the latest test split
                 "test_artifact": _get(cfg, "testing.test_artifact", "test_data.csv:latest"),
             },
             env_manager="local",
         )
 
-    log.info("Pipeline completed.")
+    log.info("Pipeline execution completed.")
 
 
 if __name__ == "__main__":
-    go()
+    try:
+        go()
+    except Exception as e:
+        log.exception("Pipeline failed: %s", e)
+        sys.exit(1)
