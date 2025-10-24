@@ -38,10 +38,7 @@ logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message
 
 # ---------- helpers (no lambdas so the pipeline is picklable) -----------------
 def fillna_text(series: pd.Series) -> pd.Series:
-    """
-    Replace NaN with empty string for text fields.
-    This must be a top-level function (not a lambda) so the pipeline is picklable.
-    """
+    """Replace NaN with empty string for text fields."""
     return series.fillna("")
 
 
@@ -59,14 +56,13 @@ def load_dataframe_from_source(source: str, wb_run=None) -> Path:
         raise FileNotFoundError(
             f"Could not find local file {source}. "
             "If you intended a W&B artifact name (e.g., 'trainval_data.csv:latest'), "
-            "you must run online with wandb and pass a valid artifact."
+            "run online with wandb and pass a valid artifact."
         )
 
     # W&B fallback: use artifact name
     LOG.info("Fetching artifact %s via W&B...", source)
     art = wb_run.use_artifact(source)
     local_dir = Path(art.download())
-    # first CSV we find in the artifact
     csvs = sorted(local_dir.glob("*.csv"))
     if not csvs:
         raise FileNotFoundError(f"No CSV found inside artifact {source} ({local_dir})")
@@ -81,9 +77,7 @@ def split_data(
     val_size: float,
     random_seed: int,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """
-    Split into train/val. If stratify_by is provided and present, use it for stratification.
-    """
+    """Split into train/val. If stratify_by is provided and present, use it for stratification."""
     y = df[target_col].copy()
     X = df.drop(columns=[target_col]).copy()
 
@@ -91,17 +85,10 @@ def split_data(
     if stratify_by and stratify_by in df.columns:
         stratify = df[stratify_by]
         LOG.info("Stratifying by column: %s", stratify_by)
-    else:
-        if stratify_by:
-            LOG.warning("Requested stratify_by='%s' but column not found; continuing without.", stratify_by)
+    elif stratify_by:
+        LOG.warning("Requested stratify_by='%s' but column not found; continuing without.", stratify_by)
 
-    return train_test_split(
-        X,
-        y,
-        test_size=val_size,
-        random_state=random_seed,
-        stratify=stratify if stratify is not None else None,
-    )
+    return train_test_split(X, y, test_size=val_size, random_state=random_seed, stratify=stratify)
 
 
 def detect_columns(X: pd.DataFrame) -> Tuple[List[str], List[str], Optional[str]]:
@@ -109,9 +96,7 @@ def detect_columns(X: pd.DataFrame) -> Tuple[List[str], List[str], Optional[str]
     Heuristically select numeric, categorical, and a single text column ('name' if present).
     """
     num_cols = X.select_dtypes(include=["number"]).columns.tolist()
-    # common categoricals present in this dataset
     likely_cat = [c for c in ["neighbourhood_group", "room_type"] if c in X.columns]
-    # include other 'object' dtypes as categoricals (except the text 'name')
     other_cat = [c for c in X.select_dtypes(include=["object"]).columns if c not in likely_cat and c != "name"]
     cat_cols = list(dict.fromkeys(likely_cat + other_cat))  # unique, preserve order
     text_col = "name" if "name" in X.columns else None
@@ -122,10 +107,7 @@ def detect_columns(X: pd.DataFrame) -> Tuple[List[str], List[str], Optional[str]
     return num_cols, cat_cols, text_col
 
 
-def build_preprocess(
-    X: pd.DataFrame,
-    max_tfidf_features: int = 200,
-) -> ColumnTransformer:
+def build_preprocess(X: pd.DataFrame, max_tfidf_features: int = 200) -> ColumnTransformer:
     """
     Build the preprocessing ColumnTransformer that imputes and encodes features.
     - numeric: median impute
@@ -134,61 +116,49 @@ def build_preprocess(
     """
     num_cols, cat_cols, text_col = detect_columns(X)
 
-    num_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-        ]
-    )
+    num_pipe = Pipeline([("imputer", SimpleImputer(strategy="median"))])
 
     cat_pipe = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("onehot", OneHotEncoder(handle_unknown="ignore", sparse=False)),
-        ]
+        [("imputer", SimpleImputer(strategy="most_frequent")),
+         ("onehot", OneHotEncoder(handle_unknown="ignore", sparse=False))]
     )
 
     transformers = []
     if num_cols:
-        transformers.append(("num", num_pipe, num_cols))  # list -> 2D as expected
+        transformers.append(("num", num_pipe, num_cols))
     if cat_cols:
         transformers.append(("cat", cat_pipe, cat_cols))
     if text_col is not None:
         text_pipe = Pipeline(
-            steps=[
-                ("fillna", FunctionTransformer(fillna_text, feature_names_out="one-to-one", validate=False)),
-                ("tfidf", TfidfVectorizer(max_features=max_tfidf_features, stop_words="english")),
-            ]
+            [("fillna", FunctionTransformer(fillna_text, feature_names_out="one-to-one", validate=False)),
+             ("tfidf", TfidfVectorizer(max_features=max_tfidf_features, stop_words="english"))]
         )
-        # Using the text column name directly is OK: ColumnTransformer will pass 1D iterable of strings
+        # ColumnTransformer accepts a single column name for pandas input
         transformers.append(("text", text_pipe, text_col))
 
     if not transformers:
         raise RuntimeError("No transformers configured; input feature space appears empty.")
 
-    pre = ColumnTransformer(transformers=transformers, remainder="drop", n_jobs=None)
-    return pre
+    return ColumnTransformer(transformers=transformers, remainder="drop", n_jobs=None)
 
 
 def build_model(rf_config_path: str) -> RandomForestRegressor:
     with open(rf_config_path) as f:
-        rf_params = json.load(f)
-    # Provide sane defaults if missing
+        rf_params_src = json.load(f)
+    # Sane defaults
     rf_params = {
-        "n_estimators": rf_params.get("n_estimators", 100),
-        "max_depth": rf_params.get("max_depth"),
-        "max_features": rf_params.get("max_features", "auto"),
-        "random_state": rf_params.get("random_state"),
-        "n_jobs": rf_params.get("n_jobs", -1),
+        "n_estimators": rf_params_src.get("n_estimators", 100),
+        "max_depth": rf_params_src.get("max_depth"),
+        "max_features": rf_params_src.get("max_features", "auto"),
+        "random_state": rf_params_src.get("random_state"),
+        "n_jobs": rf_params_src.get("n_jobs", -1),
     }
     LOG.info("RandomForest params: %s", rf_params)
     return RandomForestRegressor(**rf_params)
 
 
 def build_pipeline(pre: ColumnTransformer, rf: RandomForestRegressor) -> Pipeline:
-    """
-    The final inference pipeline.
-    """
-    return Pipeline(steps=[("preprocess", pre), ("model", rf)])
+    return Pipeline([("preprocess", pre), ("model", rf)])
 
 
 # ------------------------------- main -----------------------------------------
@@ -209,7 +179,7 @@ def parse_args() -> argparse.Namespace:
 def main():
     args = parse_args()
 
-    # W&B run (best-effort; OK if offline)
+    # Optional W&B run (best-effort)
     wb_run = None
     if _HAVE_WANDB:
         try:
@@ -221,7 +191,7 @@ def main():
     csv_path = load_dataframe_from_source(args.trainval_artifact, wb_run)
     df = pd.read_csv(csv_path)
 
-    # Expect target column named 'price' (per project)
+    # Expect target column named 'price'
     if "price" not in df.columns:
         raise ValueError("Expected target column 'price' not found in the train/val CSV.")
 

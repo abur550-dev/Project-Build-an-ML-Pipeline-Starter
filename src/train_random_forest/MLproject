@@ -24,13 +24,14 @@ entry_points:
         default: 'none'
 
       rf_config:
-        description: Random forest configuration. A path to a JSON file with the configuration that will
-                     be passed to the scikit-learn constructor for RandomForestRegressor.
+        description: Random forest configuration JSON for RandomForestRegressor
         type: string
+        default: src/train_random_forest/rf_config.json
 
       max_tfidf_features:
         description: Maximum number of words to consider for the TFIDF
         type: string
+        default: 200
 
       output_artifact:
         description: Name for the output artifact

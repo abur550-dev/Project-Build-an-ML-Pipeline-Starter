@@ -1,103 +1,89 @@
 #!/usr/bin/env python
 """
-Download from W&B the raw dataset and apply some basic data cleaning, exporting the result to a new artifact
+Basic cleaning: read input (local CSV path OR W&B artifact), drop outliers & clip by lat/long,
+save cleaned CSV, and log it as an MLflow artifact.
 """
 import argparse
 import os
 import logging
-import wandb
-import pandas as pd
+from pathlib import Path
 
+import pandas as pd
+import mlflow
+
+def _maybe_import_wandb():
+    try:
+        import wandb
+        return wandb
+    except Exception:
+        return None
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)-15s %(message)s")
-logger = logging.getLogger()
+logger = logging.getLogger("basic_cleaning")
 
-# DO NOT MODIFY
+def read_input(input_artifact: str) -> pd.DataFrame:
+    if (input_artifact.endswith(".csv") or "/" in input_artifact) and os.path.exists(input_artifact):
+        logger.info(f"Reading local CSV: {input_artifact}")
+        return pd.read_csv(input_artifact)
+
+    if ":" in input_artifact:
+        wandb = _maybe_import_wandb()
+        if wandb is None:
+            raise RuntimeError(
+                f"Input '{input_artifact}' looks like a W&B artifact, "
+                "but wandb is not available. Install wandb or pass a local CSV path."
+            )
+        logger.info(f"Fetching W&B artifact: {input_artifact}")
+        run = wandb.init(project="nyc_airbnb", job_type="basic_cleaning", group="cleaning", save_code=True)
+        path = run.use_artifact(input_artifact).file()
+        df = pd.read_csv(path)
+        wandb.finish()
+        return df
+
+    raise FileNotFoundError(
+        f"Could not interpret input_artifact='{input_artifact}'. "
+        "Pass an existing local CSV path or a W&B artifact like 'raw_data:latest'."
+    )
+
 def go(args):
+    df = read_input(args.input_artifact)
 
-    run = wandb.init(job_type="basic_cleaning")
-    run.config.update(args)
-
-    # Download input artifact. This will also log that this script is using this
-    
-    run = wandb.init(project="nyc_airbnb", group="cleaning", save_code=True)
-    artifact_local_path = run.use_artifact(args.input_artifact).file()
-    df = pd.read_csv(artifact_local_path)
-    # Drop outliers
-    min_price = args.min_price
-    max_price = args.max_price
-    idx = df['price'].between(min_price, max_price)
+    # Price filter
+    idx = df["price"].between(args.min_price, args.max_price)
     df = df[idx].copy()
-    # Convert last_review to datetime
-    df['last_review'] = pd.to_datetime(df['last_review'])
 
-    idx = df['longitude'].between(-74.25, -73.50) & df['latitude'].between(40.5, 41.2)
-    df = df[idx].copy()
-    # Save the cleaned file
-    df.to_csv('clean_sample.csv',index=False)
+    # Parse last_review
+    if "last_review" in df.columns:
+        df["last_review"] = pd.to_datetime(df["last_review"], errors="coerce")
 
-    # log the new data.
-    artifact = wandb.Artifact(
-     args.output_artifact,
-     type=args.output_type,
-     description=args.output_description,
- )
-    artifact.add_file(os.path.abspath('clean_sample.csv'))
-    run.log_artifact(artifact).wait()
+    # Geo filter (NYC bbox)
+    if {"longitude", "latitude"}.issubset(df.columns):
+        idx = df["longitude"].between(-74.25, -73.50) & df["latitude"].between(40.5, 41.2)
+        df = df[idx].copy()
 
+    # Save cleaned file
+    out_path = Path(args.output_artifact)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_path, index=False)
+    logger.info(f"Saved cleaned CSV to: {out_path.resolve()}")
 
-# TODO: In the code below, fill in the data type for each argumemt. The data type should be str, float or int. 
-# TODO: In the code below, fill in a description for each argument. The description should be a string.
+    # Log as MLflow artifact (Projects already started a run)
+    mlflow.log_artifact(str(out_path), artifact_path="basic_cleaning")
+    logger.info("✅ Logged MLflow artifact: basic_cleaning/%s", out_path.name)
+
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser(description="A very basic data cleaning")
-  
-    parser.add_argument(
-        "--input_artifact", 
-        type = str,
-        help = "Fully-qualified W&B artifact to download for cleaning (e.g., 'raw_data:latest')",
-        required = True
-    )
-
-    parser.add_argument(
-        "--output_artifact", 
-        type = str,
-        help = "Filename for the cleaned CSV artifact to create (e.g., 'clean_sample.csv')",
-        required = True
-    )
-
-    parser.add_argument(
-        "--output_type", 
-        type = str,
-        help = "W&B artifact type for the cleaned data (e.g., 'clean_sample')",
-        required = True
-    )
-
-    parser.add_argument(
-        "--output_description", 
-        type = str,
-        help = "Free-text description of what the cleaned artifact contains",
-        required = True
-    )
-
-    parser.add_argument(
-        "--min_price", 
-        type = float,
-        help = "Minimum price threshold to keep; rows below are dropped",
-        required = True
-    )
-
-    parser.add_argument(
-        "--max_price",
-        type = float,
-        help = "Maximum price threshold to keep; rows above are dropped",
-        required = True
-    )
-
-
+    parser.add_argument("--input_artifact", type=str, required=True,
+                        help="Local CSV path OR a W&B artifact like 'raw_data:latest'")
+    parser.add_argument("--output_artifact", type=str, required=True,
+                        help="Filename for the cleaned CSV to create (e.g., 'outputs/clean/clean_sample.csv')")
+    parser.add_argument("--output_type", type=str, required=True,
+                        help="(Ignored for MLflow) kept for compatibility")
+    parser.add_argument("--output_description", type=str, required=True,
+                        help="(Ignored for MLflow) kept for compatibility")
+    parser.add_argument("--min_price", type=float, required=True,
+                        help="Minimum price threshold to keep; rows below are dropped")
+    parser.add_argument("--max_price", type=float, required=True,
+                        help="Maximum price threshold to keep; rows above are dropped")
     args = parser.parse_args()
-
     go(args)
-
-    # Ensure W&B flushes
-    wandb.finish()
