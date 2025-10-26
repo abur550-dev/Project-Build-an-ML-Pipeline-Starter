@@ -3,7 +3,7 @@ import os, sys, logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Tuple
-from urllib.parse import urlparse, urlunparse, quote_from_bytes
+from urllib.parse import urlunparse, quote_from_bytes
 import mlflow
 
 logging.basicConfig(level=os.environ.get("LOGLEVEL","INFO"),
@@ -20,6 +20,7 @@ class Cfg:
             self.default_steps = ["eda","basic_cleaning","data_check","train_random_forest","test_regression_model"]
 
 def parse_known(argv: List[str]) -> Tuple[str, Dict[str,str]]:
+    # Parse main.steps=..., --steps X, and collect any --key value or --key=value options.
     steps = None
     params: Dict[str,str] = {}
     i = 0
@@ -75,10 +76,8 @@ def main():
         log.info("Step '%s' dir: %s", s, step_dir)
         log.info("Step '%s' uri: %s", s, uri)
 
-        params = {}
-        if s == "test_regression_model":
-            for k in ("mlflow_model","test_artifact"):
-                if k in extra_params: params[k] = extra_params[k]
+        # 🔑 Forward ALL extra params to every step; each step's MLproject will validate what's needed.
+        params = dict(extra_params)
 
         log.info("Calling mlflow.run(entry_point='main', env_manager='local', parameters=%s)", params)
         mlflow.run(
