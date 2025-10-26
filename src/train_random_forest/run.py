@@ -44,30 +44,27 @@ def fillna_text(series: pd.Series) -> pd.Series:
 
 def load_dataframe_from_source(source: str, wb_run=None) -> Path:
     """
-    Resolve a train/val CSV either from a local path or a Weights & Biases artifact name.
-    Returns a local file path.
+    Resolve a train/val CSV from a local path first; if that fails and 'source'
+    looks like a W&B artifact spec (contains ':'), fetch via W&B.
+    Returns a local CSV path.
     """
     p = Path(source)
     if p.exists() and p.is_file():
-        LOG.info("Loading train/val CSV from local path: %s", p)
+        LOG.info("✅ Using local CSV: %s", p)
         return p
 
-    if wb_run is None:
-        raise FileNotFoundError(
-            f"Could not find local file {source}. "
-            "If you intended a W&B artifact name (e.g., 'trainval_data.csv:latest'), "
-            "run online with wandb and pass a valid artifact."
-        )
+    # Fallback to W&B artifact if syntax matches and a run is available
+    if ":" in source and wb_run is not None:
+        LOG.info("Fetching W&B artifact: %s", source)
+        art = wb_run.use_artifact(source)
+        local_dir = Path(art.download())
+        csvs = sorted(local_dir.glob("*.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No CSV found inside artifact {source}")
+        LOG.info("Loaded CSV from artifact: %s", csvs[0])
+        return csvs[0]
 
-    # W&B fallback: use artifact name
-    LOG.info("Fetching artifact %s via W&B...", source)
-    art = wb_run.use_artifact(source)
-    local_dir = Path(art.download())
-    csvs = sorted(local_dir.glob("*.csv"))
-    if not csvs:
-        raise FileNotFoundError(f"No CSV found inside artifact {source} ({local_dir})")
-    LOG.info("Loaded CSV from artifact: %s", csvs[0])
-    return csvs[0]
+    raise FileNotFoundError(f"❌ Could not locate dataset: {source}")
 
 
 def split_data(
@@ -258,3 +255,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
